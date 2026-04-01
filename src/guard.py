@@ -483,6 +483,12 @@ class QbitClient:
         except Exception as e:
             log.warning("Failed to add tags '%s' to torrent %s: %s", tags, h, e)
 
+    def remove_tags(self, h: str, tags: str) -> None:
+        try:
+            self.post("/api/v2/torrents/removeTags", {"hashes": h, "tags": tags})
+        except Exception as e:
+            log.warning("Failed to remove tags '%s' from torrent %s: %s", tags, h, e)
+
     def info(self, h: str) -> Optional[Dict[str, Any]]:
         arr = self.get_json("/api/v2/torrents/info", {"hashes": h}) or []
         return arr[0] if arr else None
@@ -1524,6 +1530,7 @@ class TorrentGuard:
             log_stage_result("Guard Outcome", outcome, outcome_details)
             raise RuntimeError("qB failed to stop torrent before checks")
         self.qbit.add_tags(torrent_hash, "guard:stopped")
+        self.qbit.remove_tags(torrent_hash, "guard:metadata-pending")
 
         # Check torrent age (filter out fake torrents with 0 or very recent creation date)
         if self.cfg.min_torrent_age_minutes > 0:
@@ -1651,19 +1658,24 @@ class TorrentGuard:
                 log_stage_result("Guard Outcome", outcome, outcome_details)
                 raise RuntimeError("metadata fetch failed: %s" % short_error(e)) from e
             if not files:
-                log.warning("Metadata not available; skipping ISO/ext check.")
+                self.qbit.add_tags(torrent_hash, "guard:metadata-pending")
+                log.warning("Metadata not available; keeping torrent stopped for retry.")
                 log_stage_result("File/ISO/Ext Check", "SKIP", "reason=metadata-unavailable")
-            else:
-                deleted = self.iso.evaluate_and_act(torrent_hash, category_norm)
-                if deleted:
-                    outcome = "DELETE"
-                    outcome_details = "hash=%s reason=file-check-delete" % torrent_hash[:8]
-                    log_stage_result("Guard Outcome", outcome, outcome_details)
-                    return
+                outcome = "RETRY"
+                outcome_details = "hash=%s reason=metadata-unavailable" % torrent_hash[:8]
+                log_stage_result("Guard Outcome", outcome, outcome_details)
+                raise RuntimeError("metadata unavailable; torrent kept stopped for retry")
+            deleted = self.iso.evaluate_and_act(torrent_hash, category_norm)
+            if deleted:
+                outcome = "DELETE"
+                outcome_details = "hash=%s reason=file-check-delete" % torrent_hash[:8]
+                log_stage_result("Guard Outcome", outcome, outcome_details)
+                return
         else:
             log_stage_result("File/ISO/Ext Check", "SKIP", "reason=disabled")
 
         # 3) Start for real
+        self.qbit.remove_tags(torrent_hash, "guard:metadata-pending")
         self.qbit.add_tags(torrent_hash, "guard:allowed")
         if not self.cfg.dry_run:
             if not self.qbit.start(torrent_hash):
