@@ -21,6 +21,7 @@ Behavior:
 """
 
 import os, sys, json, time, signal, math, urllib.parse as uparse
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Set, Tuple, Any
 import urllib.error
 
@@ -45,6 +46,7 @@ GUARD_RUN_MAX_RETRIES = int(os.getenv("GUARD_RUN_MAX_RETRIES", "3"))
 GUARD_RUN_INITIAL_BACKOFF_SEC = float(os.getenv("GUARD_RUN_INITIAL_BACKOFF_SEC", "30.0"))
 GUARD_RUN_MAX_BACKOFF_SEC = float(os.getenv("GUARD_RUN_MAX_BACKOFF_SEC", "900.0"))
 QBIT_CONNECTION_WARN_AFTER_ATTEMPT = int(os.getenv("QBIT_CONNECTION_WARN_AFTER_ATTEMPT", "0"))
+WATCH_MAX_CONCURRENT_GUARDS = int(os.getenv("WATCH_MAX_CONCURRENT_GUARDS", "8"))
 
 def is_connection_error(e: Exception) -> bool:
     """Check if an exception indicates a connection problem that warrants retry."""
@@ -93,10 +95,18 @@ def qb_sync_maindata(http: HttpClient, cfg: Config, rid: int) -> Dict:
     raw = http.get(url)
     return {} if not raw else json.loads(raw.decode("utf-8"))
 
-def _should_process(h: str, t: Dict, seen: Set[str], retry_state: Dict[str, Dict[str, Any]], now_ts: float) -> Tuple[bool, str]:
+
+def run_guard_job(cfg: Config, torrent_hash: str, category: str) -> None:
+    # Each worker gets its own guard/client state so retries and auth cookies do
+    # not race across threads.
+    TorrentGuard(cfg).run(torrent_hash, category)
+
+def _should_process(h: str, t: Dict, seen: Set[str], retry_state: Dict[str, Dict[str, Any]], inflight: Set[str], now_ts: float) -> Tuple[bool, str]:
     # Manual rescan via keyword in category or tags
     cat = (t.get("category") or "").strip().lower()
     tags = (t.get("tags") or "").strip().lower()
+    if h in inflight:
+        return False, "in-flight"
     if RESCAN_KEYWORD and (RESCAN_KEYWORD in cat or RESCAN_KEYWORD in tags):
         return True, "manual-rescan"
     retry = retry_state.get(h)
@@ -111,7 +121,6 @@ def main():
     cfg = Config()
     http = HttpClient(cfg.ignore_tls, cfg.user_agent)
     qb = QbitClient(cfg, http)
-    guard = TorrentGuard(cfg)
     log.info("Watcher configuration loaded - host=%s, categories=%s", cfg.qbit_host, sorted(cfg.allowed_categories))
 
     # graceful shutdown
@@ -144,163 +153,169 @@ def main():
     seen: Set[str] = set()
     rid = 0
     retry_state: Dict[str, Dict[str, Any]] = {}
+    executor = ThreadPoolExecutor(max_workers=max(1, WATCH_MAX_CONCURRENT_GUARDS), thread_name_prefix="guard")
+    inflight: Dict[str, Dict[str, Any]] = {}
     first_snapshot = True
     consecutive_failures = 0
     log.info(
-        "Watcher (stateless) started - version %s, host=%s, poll=%.1fs, process_existing_at_start=%s, rescan-keyword='%s', guard_run_max_retries=%d",
-        VERSION, cfg.qbit_host, POLL_SEC, PROCESS_EXISTING_AT_START, RESCAN_KEYWORD or "(disabled)", GUARD_RUN_MAX_RETRIES
+        "Watcher (stateless) started - version %s, host=%s, poll=%.1fs, process_existing_at_start=%s, rescan-keyword='%s', guard_run_max_retries=%d, max_concurrent_guards=%d",
+        VERSION, cfg.qbit_host, POLL_SEC, PROCESS_EXISTING_AT_START, RESCAN_KEYWORD or "(disabled)", GUARD_RUN_MAX_RETRIES, max(1, WATCH_MAX_CONCURRENT_GUARDS)
     )
 
-    while not stop["flag"]:
-        try:
-            data = qb_sync_maindata(http, cfg, rid)
-            if not data:
-                time.sleep(POLL_SEC)
-                continue
+    try:
+        while not stop["flag"]:
+            try:
+                completed_hashes = [h for h, item in inflight.items() if item["future"].done()]
+                for h in completed_hashes:
+                    item = inflight.pop(h)
+                    future = item["future"]
+                    name = item["name"]
+                    try:
+                        future.result()
+                        if h in retry_state:
+                            attempt_count = int(retry_state[h].get("attempt", 0))
+                            log.info("Guard retry succeeded for torrent %s after %d failed attempt(s).", h[:8], attempt_count)
+                            retry_state.pop(h, None)
+                        seen.add(h)
+                    except Exception as e:
+                        error_str = str(e).split("\n")[0][:100]
+                        if "404" in error_str or "Not Found" in error_str:
+                            log.warning("Torrent %s (%s) was deleted before processing completed: %s", h[:8], name[:50], error_str)
+                            retry_state.pop(h, None)
+                            seen.add(h)
+                        elif "401" in error_str or "403" in error_str or "Unauthorized" in error_str or "Forbidden" in error_str:
+                            log.error("Authentication failed while processing torrent %s (%s): %s", h[:8], name[:50], error_str)
+                            retry_state.pop(h, None)
+                            seen.add(h)
+                        else:
+                            seen.add(h)
+                            if GUARD_RUN_MAX_RETRIES <= 0:
+                                log.error("Guard run failed for torrent %s (%s): %s", h[:8], name[:50], error_str)
+                                continue
 
-            # Reset failure counter on successful request
-            consecutive_failures = 0
+                            prev_attempt = int(retry_state.get(h, {}).get("attempt", 0))
+                            next_attempt = prev_attempt + 1
+                            if next_attempt > GUARD_RUN_MAX_RETRIES:
+                                retry_state.pop(h, None)
+                                log.error(
+                                    "Guard run failed for torrent %s (%s): %s | retry budget exhausted after %d attempt(s)",
+                                    h[:8], name[:50], error_str, prev_attempt
+                                )
+                                continue
 
-            rid = data.get("rid", rid)
-            torrents = data.get("torrents") or {}
-            removed = data.get("torrents_removed") or []
+                            delay = compute_backoff_delay(
+                                next_attempt - 1,
+                                GUARD_RUN_INITIAL_BACKOFF_SEC,
+                                GUARD_RUN_MAX_BACKOFF_SEC,
+                            )
+                            retry_state[h] = {
+                                "attempt": next_attempt,
+                                "next_retry_at": time.time() + delay,
+                                "last_error": error_str,
+                            }
+                            log.warning(
+                                "Guard run failed for torrent %s (%s): %s | retrying in %.1f seconds (attempt %d/%d)",
+                                h[:8], name[:50], error_str, delay, next_attempt, GUARD_RUN_MAX_RETRIES
+                            )
 
-            # First snapshot behavior
-            if first_snapshot:
-                first_snapshot = False
-                present = set(torrents.keys())
-                if PROCESS_EXISTING_AT_START:
-                    log.info("Initial snapshot: processing %d existing torrents.", len(present))
-                    # fall through: they will be processed below (since not in 'seen' yet)
-                else:
-                    seen |= {h for h in present if h not in retry_state}
-                    retry_candidates = sum(1 for h in present if h in retry_state)
-                    log.info(
-                        "Initial snapshot: indexed %d existing torrents (not processing), %d scheduled retry(s) remain eligible.",
-                        len(present),
-                        retry_candidates,
-                    )
-
-            # Forget hashes for removed torrents so re-adds will trigger again
-            for h in removed:
-                if h in seen:
-                    seen.discard(h)
-                retry_state.pop(h, None)
-
-            # Handle new/changed torrents in this delta
-            now_ts = time.time()
-            for h, t in torrents.items():
-                name = t.get("name") or ""
-                category = (t.get("category") or "").strip()
-                ok, reason = _should_process(h, t, seen, retry_state, now_ts)
-                if not ok:
-                    log.debug("Skip %s | %s", h, reason)
+                data = qb_sync_maindata(http, cfg, rid)
+                if not data:
+                    time.sleep(POLL_SEC)
                     continue
 
-                log.info("Processing %s | reason=%s | category='%s' | name='%s'", h, reason, category, name)
-                try:
-                    guard.run(h, category)
-                    if h in retry_state:
-                        attempt_count = int(retry_state[h].get("attempt", 0))
-                        log.info("Guard retry succeeded for torrent %s after %d failed attempt(s).", h[:8], attempt_count)
-                        retry_state.pop(h, None)
-                    seen.add(h)
-                except Exception as e:
-                    error_str = str(e).split('\n')[0][:100]
-                    if "404" in error_str or "Not Found" in error_str:
-                        log.warning("Torrent %s (%s) was deleted before processing completed: %s", h[:8], name[:50], error_str)
-                        retry_state.pop(h, None)
-                        seen.add(h)
-                    elif "401" in error_str or "403" in error_str or "Unauthorized" in error_str or "Forbidden" in error_str:
-                        log.error("Authentication failed while processing torrent %s (%s): %s", h[:8], name[:50], error_str)
-                        retry_state.pop(h, None)
-                        seen.add(h)
+                consecutive_failures = 0
+                rid = data.get("rid", rid)
+                torrents = data.get("torrents") or {}
+                removed = data.get("torrents_removed") or []
+
+                if first_snapshot:
+                    first_snapshot = False
+                    present = set(torrents.keys())
+                    if PROCESS_EXISTING_AT_START:
+                        log.info("Initial snapshot: processing %d existing torrents.", len(present))
                     else:
-                        seen.add(h)
-                        if GUARD_RUN_MAX_RETRIES <= 0:
-                            log.error("Guard run failed for torrent %s (%s): %s", h[:8], name[:50], error_str)
-                            continue
-
-                        prev_attempt = int(retry_state.get(h, {}).get("attempt", 0))
-                        next_attempt = prev_attempt + 1
-                        if next_attempt > GUARD_RUN_MAX_RETRIES:
-                            retry_state.pop(h, None)
-                            log.error(
-                                "Guard run failed for torrent %s (%s): %s | retry budget exhausted after %d attempt(s)",
-                                h[:8], name[:50], error_str, prev_attempt
-                            )
-                            continue
-
-                        delay = compute_backoff_delay(
-                            next_attempt - 1,
-                            GUARD_RUN_INITIAL_BACKOFF_SEC,
-                            GUARD_RUN_MAX_BACKOFF_SEC,
-                        )
-                        retry_state[h] = {
-                            "attempt": next_attempt,
-                            "next_retry_at": now_ts + delay,
-                            "last_error": error_str,
-                        }
-                        log.warning(
-                            "Guard run failed for torrent %s (%s): %s | retrying in %.1f seconds (attempt %d/%d)",
-                            h[:8], name[:50], error_str, delay, next_attempt, GUARD_RUN_MAX_RETRIES
+                        seen |= {h for h in present if h not in retry_state}
+                        retry_candidates = sum(1 for h in present if h in retry_state)
+                        log.info(
+                            "Initial snapshot: indexed %d existing torrents (not processing), %d scheduled retry(s) remain eligible.",
+                            len(present),
+                            retry_candidates,
                         )
 
-        except Exception as e:
-            if is_connection_error(e):
-                consecutive_failures += 1
-                log_connection_event(
-                    consecutive_failures,
-                    "Connection error (consecutive failure %d): %s",
-                    consecutive_failures,
-                    str(e).split('\n')[0][:100],
-                )
-                
-                # If we've had multiple consecutive failures, attempt reconnection
-                if consecutive_failures >= 2:
+                for h in removed:
+                    seen.discard(h)
+                    retry_state.pop(h, None)
+                    inflight.pop(h, None)
+
+                now_ts = time.time()
+                inflight_hashes = set(inflight.keys())
+                for h, t in torrents.items():
+                    name = t.get("name") or ""
+                    category = (t.get("category") or "").strip()
+                    ok, reason = _should_process(h, t, seen, retry_state, inflight_hashes, now_ts)
+                    if not ok:
+                        log.debug("Skip %s | %s", h, reason)
+                        continue
+
+                    log.info("Processing %s | reason=%s | category='%s' | name='%s'", h, reason, category, name)
+                    inflight[h] = {
+                        "future": executor.submit(run_guard_job, cfg, h, category),
+                        "name": name,
+                        "category": category,
+                    }
+                    inflight_hashes.add(h)
+
+            except Exception as e:
+                if is_connection_error(e):
+                    consecutive_failures += 1
                     log_connection_event(
                         consecutive_failures,
-                        "Multiple connection failures detected (%d), attempting full reconnection...",
+                        "Connection error (consecutive failure %d): %s",
                         consecutive_failures,
+                        str(e).split("\n")[0][:100],
                     )
-                    
-                    # Reset connection state
-                    rid = 0  # Reset request ID to start fresh
-                    first_snapshot = True  # Re-initialize snapshot state
-                    
-                    # Attempt to re-authenticate with exponential backoff
-                    reconnected = False
-                    for attempt in range(MAX_RETRY_ATTEMPTS):
-                        try:
-                            qb.login()
-                            log.info("Successfully reconnected to qBittorrent after %d attempts", attempt + 1)
-                            if consecutive_failures >= connection_warn_after():
-                                log.info("Watcher connection recovered after %d consecutive failure(s)", consecutive_failures)
-                            consecutive_failures = 0
-                            reconnected = True
-                            break
-                        except Exception as auth_e:
-                            if not is_connection_error(auth_e) or attempt == MAX_RETRY_ATTEMPTS - 1:
-                                log.error("Reconnection attempt failed after %d attempts: %s", attempt + 1, auth_e)
+
+                    if consecutive_failures >= 2:
+                        log_connection_event(
+                            consecutive_failures,
+                            "Multiple connection failures detected (%d), attempting full reconnection...",
+                            consecutive_failures,
+                        )
+                        rid = 0
+                        first_snapshot = True
+
+                        reconnected = False
+                        for attempt in range(MAX_RETRY_ATTEMPTS):
+                            try:
+                                qb.login()
+                                log.info("Successfully reconnected to qBittorrent after %d attempts", attempt + 1)
+                                if consecutive_failures >= connection_warn_after():
+                                    log.info("Watcher connection recovered after %d consecutive failure(s)", consecutive_failures)
+                                consecutive_failures = 0
+                                reconnected = True
                                 break
-                            exponential_backoff_sleep(attempt)
-                    
-                    if not reconnected:
-                        log.critical("Fatal: Failed to reconnect to qBittorrent after multiple attempts")
-                        log.critical("Terminating watcher process (exit code 3)")
-                        sys.exit(3)
+                            except Exception as auth_e:
+                                if not is_connection_error(auth_e) or attempt == MAX_RETRY_ATTEMPTS - 1:
+                                    log.error("Reconnection attempt failed after %d attempts: %s", attempt + 1, auth_e)
+                                    break
+                                exponential_backoff_sleep(attempt)
+
+                        if not reconnected:
+                            log.critical("Fatal: Failed to reconnect to qBittorrent after multiple attempts")
+                            log.critical("Terminating watcher process (exit code 3)")
+                            sys.exit(3)
+                    else:
+                        exponential_backoff_sleep(0)
                 else:
-                    # Single failure, just wait before retry
-                    exponential_backoff_sleep(0)
-            else:
-                # Non-connection error, log and continue
-                log.error("Watcher loop error (non-connection): %s", str(e).split('\n')[0][:100])
-                consecutive_failures = 0
+                    log.error("Watcher loop error (non-connection): %s", str(e).split("\n")[0][:100])
+                    consecutive_failures = 0
 
-        time.sleep(POLL_SEC)
+            time.sleep(POLL_SEC)
 
-    log.info("Received shutdown signal, cleaning up...")
-    log.info("qbit-guard watcher shutdown complete")
+        log.info("Received shutdown signal, cleaning up...")
+    finally:
+        executor.shutdown(wait=False, cancel_futures=False)
+        log.info("qbit-guard watcher shutdown complete")
 
 if __name__ == "__main__":
     main()

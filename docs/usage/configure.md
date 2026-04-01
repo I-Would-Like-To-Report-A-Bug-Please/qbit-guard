@@ -232,6 +232,7 @@ Configure polling behavior for container mode:
 WATCH_POLL_SECONDS=3.0                       # How often to check for new torrents
 WATCH_PROCESS_EXISTING_AT_START=0            # Set to 1 to process existing torrents on startup
 WATCH_RESCAN_KEYWORD=rescan                  # Add this keyword to category/tags to force reprocessing
+WATCH_MAX_CONCURRENT_GUARDS=8                # Number of torrents to guard in parallel
 QBIT_CONNECTION_WARN_AFTER_ATTEMPT=0         # Start warning around halfway through watcher reconnect retries
 GUARD_RUN_MAX_RETRIES=3                      # Retry failed guard runs for the same torrent
 GUARD_RUN_INITIAL_BACKOFF_SEC=30.0           # First retry delay after a guard failure
@@ -242,6 +243,10 @@ When a per-torrent guard run fails mid-processing, the watcher now keeps that
 torrent eligible for retry in-memory instead of marking it permanently done.
 This is especially helpful for temporary qBittorrent, Sonarr, Radarr, DNS, or
 internet reachability issues during metadata fetches or release-date checks.
+
+`WATCH_MAX_CONCURRENT_GUARDS` controls how many torrents can be guarded at the
+same time. Increase it above `1` if metadata waits or slow API calls are
+causing head-of-line blocking in the watcher loop.
 
 ### Connection Reliability
 
