@@ -15,11 +15,11 @@ Flow (on torrent ADDED):
        - Else: start torrent for real.
 
 Configurable via environment variables and optional /config/extensions.json.
-All logs go to stdout (container logs). Pure stdlib.
+All logs go to stdout (container logs).
 """
 
 from __future__ import annotations
-import os, sys, re, json, ssl, time, datetime, logging
+import os, sys, re, json, ssl, time, datetime
 import math
 import http.cookiejar as cookiejar
 import urllib.parse as uparse
@@ -29,29 +29,11 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Sequence, Tuple, Set
 
 from version import VERSION
+from logging_setup import get_logger
 # --------------------------- Logging ---------------------------
 
-# Add custom DETAILED logging level (between INFO=20 and DEBUG=10)
-DETAILED_LEVEL = 15
-logging.addLevelName(DETAILED_LEVEL, "DETAILED")
-
-def detailed(self, message, *args, **kwargs):
-    """Log message with DETAILED level."""
-    if self.isEnabledFor(DETAILED_LEVEL):
-        self._log(DETAILED_LEVEL, message, args, **kwargs)
-
-logging.Logger.detailed = detailed
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-# Map DETAILED to our custom level
-level_value = DETAILED_LEVEL if LOG_LEVEL == "DETAILED" else getattr(logging, LOG_LEVEL, logging.INFO)
-
-logging.basicConfig(
-    level=level_value,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    stream=sys.stdout,
-)
-log = logging.getLogger("qbit-guard")
+log = get_logger("qbit-guard")
 log.info("qbit-guard version %s starting (log level %s)", VERSION, LOG_LEVEL)
 
 # --------------------------- Helpers (extensions) ---------------------------
@@ -1008,9 +990,9 @@ class PreAirGate:
         if not episodes:
             msg = "No Sonarr history."
             if self.cfg.resume_if_no_history:
-                log.info("Pre-air: %s Proceeding to file check.", msg)
+                log.debug("Pre-air: %s Proceeding to file check.", msg)
                 return True, "no-history", hist
-            log.info("Pre-air: %s Keeping stopped.", msg)
+            log.debug("Pre-air: %s Keeping stopped.", msg)
             return False, "no-history", hist
 
         # Load episodes and compute future hours from Sonarr
@@ -1078,15 +1060,15 @@ class PreAirGate:
         whitelist_allowed = allow_by_group or allow_by_indexer or allow_by_tracker
 
         if (not all_aired) and (max_future > self.cfg.early_hard_limit_hours) and (not (self.cfg.whitelist_overrides_hard_limit and whitelist_allowed)):
-            log.info("Pre-air: BLOCK_CAP max_future=%.2f h", max_future)
+            log.debug("Pre-air: BLOCK_CAP max_future=%.2f h", max_future)
             return False, "cap", hist
 
         if all_aired or allow_by_grace or whitelist_allowed:
             reason = "+".join([x for x,ok in [("aired",all_aired),("grace",allow_by_grace),("whitelist",whitelist_allowed)] if ok]) or "allow"
-            log.info("Pre-air: ALLOW (%s)", reason)
+            log.debug("Pre-air: ALLOW (%s)", reason)
             return True, reason, hist
 
-        log.info("Pre-air: BLOCK (max_future=%.2f h)", max_future)
+        log.debug("Pre-air: BLOCK (max_future=%.2f h)", max_future)
         return False, "block", hist
 
 
@@ -1127,9 +1109,9 @@ class PreAirMovieGate:
         if not movies:
             msg = "No Radarr history."
             if self.cfg.resume_if_no_history:
-                log.info("Pre-air Movie: %s Proceeding to file check.", msg)
+                log.debug("Pre-air Movie: %s Proceeding to file check.", msg)
                 return True, "no-history", hist
-            log.info("Pre-air Movie: %s Keeping stopped.", msg)
+            log.debug("Pre-air Movie: %s Keeping stopped.", msg)
             return False, "no-history", hist
 
         # Load movies and compute future hours from Radarr
@@ -1199,15 +1181,15 @@ class PreAirMovieGate:
         whitelist_allowed = allow_by_group or allow_by_indexer or allow_by_tracker
 
         if (not all_released) and (max_future > self.cfg.early_hard_limit_hours) and (not (self.cfg.whitelist_overrides_hard_limit and whitelist_allowed)):
-            log.info("Pre-air Movie: BLOCK_CAP max_future=%.2f h", max_future)
+            log.debug("Pre-air Movie: BLOCK_CAP max_future=%.2f h", max_future)
             return False, "cap", hist
 
         if all_released or allow_by_grace or whitelist_allowed:
             reason = "+".join([x for x,ok in [("released",all_released),("grace",allow_by_grace),("whitelist",whitelist_allowed)] if ok]) or "allow"
-            log.info("Pre-air Movie: ALLOW (%s)", reason)
+            log.debug("Pre-air Movie: ALLOW (%s)", reason)
             return True, reason, hist
 
-        log.info("Pre-air Movie: BLOCK (max_future=%.2f h)", max_future)
+        log.debug("Pre-air Movie: BLOCK (max_future=%.2f h)", max_future)
         return False, "block", hist
 
 
@@ -1497,18 +1479,30 @@ class TorrentGuard:
 
     def run(self, torrent_hash: str, passed_category: str) -> None:
         """Entry point for a single torrent hash."""
+        outcome = "UNKNOWN"
+        outcome_details = "hash=%s" % torrent_hash[:8]
+
         # Login qB
         try:
             self.qbit.login()
         except Exception as e:
+            outcome = "FAILED"
+            outcome_details = "hash=%s stage=login error=%s" % (torrent_hash[:8], short_error(e))
+            log_stage_result("Guard Outcome", outcome, outcome_details)
             raise RuntimeError("qBittorrent login failed: %s" % short_error(e)) from e
 
         try:
             info = self.qbit.info(torrent_hash)
         except Exception as e:
+            outcome = "FAILED"
+            outcome_details = "hash=%s stage=info error=%s" % (torrent_hash[:8], short_error(e))
+            log_stage_result("Guard Outcome", outcome, outcome_details)
             raise RuntimeError("qB torrent info lookup failed: %s" % short_error(e)) from e
         if not info:
             log.info("No torrent found for hash; exiting.")
+            outcome = "SKIP"
+            outcome_details = "hash=%s reason=not-found" % torrent_hash[:8]
+            log_stage_result("Guard Outcome", outcome, outcome_details)
             return
 
         category = (passed_category or info.get("category") or "").strip()
@@ -1518,11 +1512,16 @@ class TorrentGuard:
 
         if category_norm not in self.cfg.allowed_categories:
             log.info("Category '%s' not in allowed list %s - skipping.", category, sorted(self.cfg.allowed_categories))
-            log_stage_result("Guard", "SKIP", "hash=%s reason=category-not-allowed" % torrent_hash[:8])
+            outcome = "SKIP"
+            outcome_details = "hash=%s reason=category-not-allowed" % torrent_hash[:8]
+            log_stage_result("Guard Outcome", outcome, outcome_details)
             return
 
         # Stop immediately and tag
         if not self.qbit.stop(torrent_hash):
+            outcome = "FAILED"
+            outcome_details = "hash=%s stage=initial-stop error=qB failed to stop torrent before checks" % torrent_hash[:8]
+            log_stage_result("Guard Outcome", outcome, outcome_details)
             raise RuntimeError("qB failed to stop torrent before checks")
         self.qbit.add_tags(torrent_hash, "guard:stopped")
 
@@ -1555,6 +1554,9 @@ class TorrentGuard:
                             log.error("qB delete failed: %s", e)
                     else:
                         log.info("DRY-RUN: would remove torrent %s (too new, age=%.1f mins).", torrent_hash, torrent_age_minutes)
+                    outcome = "DELETE"
+                    outcome_details = "hash=%s reason=too-new" % torrent_hash[:8]
+                    log_stage_result("Guard Outcome", outcome, outcome_details)
                     return
                 else:
                     log.info("Torrent age check: PASSED (age=%.1f mins >= minimum=%d mins).",
@@ -1566,6 +1568,9 @@ class TorrentGuard:
         try:
             trackers = self.qbit.trackers(torrent_hash) or []
         except Exception as e:
+            outcome = "FAILED"
+            outcome_details = "hash=%s stage=trackers error=%s" % (torrent_hash[:8], short_error(e))
+            log_stage_result("Guard Outcome", outcome, outcome_details)
             raise RuntimeError("qB tracker lookup failed: %s" % short_error(e)) from e
         tracker_hosts = {domain_from_url(t.get("url","")) for t in trackers if t.get("url")}
 
@@ -1600,6 +1605,9 @@ class TorrentGuard:
                         log.error("qB delete failed: %s", e)
                 else:
                     log.info("DRY-RUN: would delete torrent %s due to TV pre-air (reason=%s).", torrent_hash, reason)
+                outcome = "DELETE"
+                outcome_details = "hash=%s reason=preair-tv:%s" % (torrent_hash[:8], reason)
+                log_stage_result("Guard Outcome", outcome, outcome_details)
                 return
             else:
                 log_stage_result("Pre-air TV", "PASS", "reason=%s" % reason)
@@ -1623,6 +1631,9 @@ class TorrentGuard:
                         log.error("qB delete failed: %s", e)
                 else:
                     log.info("DRY-RUN: would delete torrent %s due to movie pre-air (reason=%s).", torrent_hash, reason)
+                outcome = "DELETE"
+                outcome_details = "hash=%s reason=preair-movie:%s" % (torrent_hash[:8], reason)
+                log_stage_result("Guard Outcome", outcome, outcome_details)
                 return
             else:
                 log_stage_result("Pre-air Movie", "PASS", "reason=%s" % reason)
@@ -1635,6 +1646,9 @@ class TorrentGuard:
             try:
                 files = self.metadata.fetch(torrent_hash)
             except Exception as e:
+                outcome = "FAILED"
+                outcome_details = "hash=%s stage=metadata error=%s" % (torrent_hash[:8], short_error(e))
+                log_stage_result("Guard Outcome", outcome, outcome_details)
                 raise RuntimeError("metadata fetch failed: %s" % short_error(e)) from e
             if not files:
                 log.warning("Metadata not available; skipping ISO/ext check.")
@@ -1642,6 +1656,9 @@ class TorrentGuard:
             else:
                 deleted = self.iso.evaluate_and_act(torrent_hash, category_norm)
                 if deleted:
+                    outcome = "DELETE"
+                    outcome_details = "hash=%s reason=file-check-delete" % torrent_hash[:8]
+                    log_stage_result("Guard Outcome", outcome, outcome_details)
                     return
         else:
             log_stage_result("File/ISO/Ext Check", "SKIP", "reason=disabled")
@@ -1650,8 +1667,14 @@ class TorrentGuard:
         self.qbit.add_tags(torrent_hash, "guard:allowed")
         if not self.cfg.dry_run:
             if not self.qbit.start(torrent_hash):
+                outcome = "FAILED"
+                outcome_details = "hash=%s stage=final-start error=qB failed to start torrent after checks" % torrent_hash[:8]
+                log_stage_result("Guard Outcome", outcome, outcome_details)
                 raise RuntimeError("qB failed to start torrent after checks")
         log_stage_result("Final Start", "PASS", "hash=%s name=%s" % (torrent_hash[:8], name[:60]))
+        outcome = "ALLOW"
+        outcome_details = "hash=%s name=%s" % (torrent_hash[:8], name[:60])
+        log_stage_result("Guard Outcome", outcome, outcome_details)
 
 
 # --------------------------- Main ---------------------------

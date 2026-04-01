@@ -29,6 +29,7 @@ Complete reference of all environment variables supported by qbit-guard, organiz
 | `WATCH_POLL_SECONDS` | `3.0` | How often to check qBittorrent for new torrents (seconds) |
 | `WATCH_PROCESS_EXISTING_AT_START` | `0` | Process existing torrents when container starts (`0` or `1`) |
 | `WATCH_RESCAN_KEYWORD` | `rescan` | Keyword in category/tags to force reprocessing |
+| `QBIT_CONNECTION_WARN_AFTER_ATTEMPT` | `0` | Start warning only from this watcher connection retry onward (`0` = auto, roughly halfway through retries) |
 | `GUARD_RUN_MAX_RETRIES` | `3` | Retry failed per-torrent guard runs this many times (`0` disables retries) |
 | `GUARD_RUN_INITIAL_BACKOFF_SEC` | `30.0` | Initial delay before retrying a failed guard run |
 | `GUARD_RUN_MAX_BACKOFF_SEC` | `900.0` | Maximum delay between failed guard-run retries |

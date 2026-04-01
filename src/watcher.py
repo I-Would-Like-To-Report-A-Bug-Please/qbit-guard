@@ -20,44 +20,17 @@ Behavior:
   (default 'rescan'), even if we've already processed it in this session.
 """
 
-import os, sys, json, time, signal, logging, urllib.parse as uparse
+import os, sys, json, time, signal, math, urllib.parse as uparse
 from typing import Dict, Set, Tuple, Any
 import urllib.error
 
 # Your class-based guard + clients
 from guard import Config, HttpClient, QbitClient, TorrentGuard
+from logging_setup import get_logger
 from version import VERSION
 
-# Add custom DETAILED logging level (between INFO=20 and DEBUG=10)
-DETAILED_LEVEL = 15
-logging.addLevelName(DETAILED_LEVEL, "DETAILED")
-
-def detailed(self, message, *args, **kwargs):
-    """Log message with DETAILED level."""
-    if self.isEnabledFor(DETAILED_LEVEL):
-        self._log(DETAILED_LEVEL, message, args, **kwargs)
-
-logging.Logger.detailed = detailed
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-# Map DETAILED to our custom level
-level_value = DETAILED_LEVEL if LOG_LEVEL == "DETAILED" else getattr(logging, LOG_LEVEL, logging.INFO)
-
-logging.basicConfig(
-    level=level_value,
-    format="%(asctime)s | %(levelname)s | %(message)s",
-    stream=sys.stdout,
-)
-
-# Create a filter to add version to all log records
-class VersionFilter(logging.Filter):
-    def filter(self, record):
-        record.version = VERSION
-        return True
-
-
-log = logging.getLogger("qbit-guard-watcher")
-log.addFilter(VersionFilter())
+log = get_logger("qbit-guard-watcher")
 
 
 POLL_SEC = float(os.getenv("WATCH_POLL_SECONDS", "3.0"))
@@ -71,6 +44,7 @@ MAX_BACKOFF_SEC = float(os.getenv("QBIT_MAX_BACKOFF_SEC", "60.0"))
 GUARD_RUN_MAX_RETRIES = int(os.getenv("GUARD_RUN_MAX_RETRIES", "3"))
 GUARD_RUN_INITIAL_BACKOFF_SEC = float(os.getenv("GUARD_RUN_INITIAL_BACKOFF_SEC", "30.0"))
 GUARD_RUN_MAX_BACKOFF_SEC = float(os.getenv("GUARD_RUN_MAX_BACKOFF_SEC", "900.0"))
+QBIT_CONNECTION_WARN_AFTER_ATTEMPT = int(os.getenv("QBIT_CONNECTION_WARN_AFTER_ATTEMPT", "0"))
 
 def is_connection_error(e: Exception) -> bool:
     """Check if an exception indicates a connection problem that warrants retry."""
@@ -84,15 +58,33 @@ def is_connection_error(e: Exception) -> bool:
         return True
     return False
 
-def exponential_backoff_sleep(attempt: int, initial_delay: float = INITIAL_BACKOFF_SEC, max_delay: float = MAX_BACKOFF_SEC) -> None:
+
+def connection_warn_after() -> int:
+    if QBIT_CONNECTION_WARN_AFTER_ATTEMPT > 0:
+        return QBIT_CONNECTION_WARN_AFTER_ATTEMPT
+    return max(2, int(math.ceil(MAX_RETRY_ATTEMPTS / 2.0)))
+
+
+def exponential_backoff_sleep(attempt: int, initial_delay: float = INITIAL_BACKOFF_SEC, max_delay: float = MAX_BACKOFF_SEC, warn_after: int = None) -> None:
     """Sleep with exponential backoff, capped at max_delay."""
     delay = min(initial_delay * (2 ** attempt), max_delay)
-    log.info("Connection failed, retrying in %.1f seconds (attempt %d/%d)", delay, attempt + 1, MAX_RETRY_ATTEMPTS)
+    threshold = warn_after if warn_after is not None else connection_warn_after()
+    if attempt + 1 >= threshold:
+        log.warning("Connection failed, retrying in %.1f seconds (attempt %d/%d)", delay, attempt + 1, MAX_RETRY_ATTEMPTS)
+    else:
+        log.debug("Connection failed, retrying in %.1f seconds (attempt %d/%d)", delay, attempt + 1, MAX_RETRY_ATTEMPTS)
     time.sleep(delay)
 
 def compute_backoff_delay(attempt: int, initial_delay: float, max_delay: float) -> float:
     """Return exponential backoff delay, capped at max_delay."""
     return min(initial_delay * (2 ** max(attempt, 0)), max_delay)
+
+
+def log_connection_event(level_attempt: int, message: str, *args) -> None:
+    if level_attempt >= connection_warn_after():
+        log.warning(message, *args)
+    else:
+        log.debug(message, *args)
 
 def qb_sync_maindata(http: HttpClient, cfg: Config, rid: int) -> Dict:
     url = f"{cfg.qbit_host}/api/v2/sync/maindata"
@@ -134,6 +126,8 @@ def main():
         for attempt in range(MAX_RETRY_ATTEMPTS):
             try:
                 qb.login()
+                if attempt + 1 >= connection_warn_after() and attempt > 0:
+                    log.info("qBittorrent login recovered after %d retr%s", attempt, "y" if attempt == 1 else "ies")
                 return True
             except Exception as e:
                 if not is_connection_error(e) or attempt == MAX_RETRY_ATTEMPTS - 1:
@@ -255,11 +249,20 @@ def main():
         except Exception as e:
             if is_connection_error(e):
                 consecutive_failures += 1
-                log.warning("Connection error (consecutive failure %d): %s", consecutive_failures, str(e).split('\n')[0][:100])
+                log_connection_event(
+                    consecutive_failures,
+                    "Connection error (consecutive failure %d): %s",
+                    consecutive_failures,
+                    str(e).split('\n')[0][:100],
+                )
                 
                 # If we've had multiple consecutive failures, attempt reconnection
                 if consecutive_failures >= 2:
-                    log.warning("Multiple connection failures detected (%d), attempting full reconnection...", consecutive_failures)
+                    log_connection_event(
+                        consecutive_failures,
+                        "Multiple connection failures detected (%d), attempting full reconnection...",
+                        consecutive_failures,
+                    )
                     
                     # Reset connection state
                     rid = 0  # Reset request ID to start fresh
@@ -271,6 +274,8 @@ def main():
                         try:
                             qb.login()
                             log.info("Successfully reconnected to qBittorrent after %d attempts", attempt + 1)
+                            if consecutive_failures >= connection_warn_after():
+                                log.info("Watcher connection recovered after %d consecutive failure(s)", consecutive_failures)
                             consecutive_failures = 0
                             reconnected = True
                             break

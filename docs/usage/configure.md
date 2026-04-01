@@ -232,6 +232,7 @@ Configure polling behavior for container mode:
 WATCH_POLL_SECONDS=3.0                       # How often to check for new torrents
 WATCH_PROCESS_EXISTING_AT_START=0            # Set to 1 to process existing torrents on startup
 WATCH_RESCAN_KEYWORD=rescan                  # Add this keyword to category/tags to force reprocessing
+QBIT_CONNECTION_WARN_AFTER_ATTEMPT=0         # Start warning around halfway through watcher reconnect retries
 GUARD_RUN_MAX_RETRIES=3                      # Retry failed guard runs for the same torrent
 GUARD_RUN_INITIAL_BACKOFF_SEC=30.0           # First retry delay after a guard failure
 GUARD_RUN_MAX_BACKOFF_SEC=900.0              # Maximum retry delay between guard failures
