@@ -20,6 +20,7 @@ QBIT_DRY_RUN=0                               # Set to 1 for testing (no actual d
 QBIT_REQUEST_RETRIES=3                       # Retry transient qB API failures per request
 QBIT_REQUEST_INITIAL_BACKOFF_SEC=1.0         # Initial qB request retry delay
 QBIT_REQUEST_MAX_BACKOFF_SEC=15.0            # Maximum qB request retry delay
+QBIT_REQUEST_WARN_AFTER_ATTEMPT=0            # Start warning around halfway through retries (0 = auto)
 ```
 
 ### Important Notes
