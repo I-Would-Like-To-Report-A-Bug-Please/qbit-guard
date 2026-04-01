@@ -18,6 +18,7 @@ Complete reference of all environment variables supported by qbit-guard, organiz
 | `QBIT_REQUEST_RETRIES` | `3` | Retry transient qBittorrent API failures this many times per request |
 | `QBIT_REQUEST_INITIAL_BACKOFF_SEC` | `1.0` | Initial retry delay for qBittorrent API requests |
 | `QBIT_REQUEST_MAX_BACKOFF_SEC` | `15.0` | Maximum retry delay for qBittorrent API requests |
+| `QBIT_REQUEST_WARN_AFTER_ATTEMPT` | `0` | Start warning only from this retry attempt onward (`0` = auto, roughly halfway through retries) |
 
 ---
 

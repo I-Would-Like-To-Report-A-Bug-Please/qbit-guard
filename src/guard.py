@@ -20,6 +20,7 @@ All logs go to stdout (container logs). Pure stdlib.
 
 from __future__ import annotations
 import os, sys, re, json, ssl, time, datetime, logging
+import math
 import http.cookiejar as cookiejar
 import urllib.parse as uparse
 import urllib.request as ureq
@@ -123,6 +124,14 @@ def compute_backoff_delay(attempt: int, initial_delay: float, max_delay: float) 
     return min(initial_delay * (2 ** max(attempt, 0)), max_delay)
 
 
+def log_stage_result(stage: str, result: str, details: str = "") -> None:
+    """Emit a consistent stage-result log line."""
+    if details:
+        log.info("%s: %s | %s", stage, result, details)
+    else:
+        log.info("%s: %s", stage, result)
+
+
 # --------------------------- Config ---------------------------
 
 # Canonical sets
@@ -157,6 +166,7 @@ class Config:
     qbit_request_retries: int = int(os.getenv("QBIT_REQUEST_RETRIES", "3"))
     qbit_request_initial_backoff_sec: float = float(os.getenv("QBIT_REQUEST_INITIAL_BACKOFF_SEC", "1.0"))
     qbit_request_max_backoff_sec: float = float(os.getenv("QBIT_REQUEST_MAX_BACKOFF_SEC", "15.0"))
+    qbit_request_warn_after_attempt: int = int(os.getenv("QBIT_REQUEST_WARN_AFTER_ATTEMPT", "0"))
 
     # Pre-air (Sonarr)
     enable_preair: bool = os.getenv("ENABLE_PREAIR_CHECK", "1") == "1"
@@ -375,11 +385,24 @@ class QbitClient:
     def _retry(self, operation: str, fn):
         attempts = max(1, self.cfg.qbit_request_retries)
         last = None
+        retries_used = 0
+        warn_after = self.cfg.qbit_request_warn_after_attempt
+        if warn_after <= 0:
+            warn_after = max(2, int(math.ceil(attempts / 2.0)))
         for attempt in range(attempts):
             try:
-                return fn()
+                result = fn()
+                if retries_used >= warn_after:
+                    log.info(
+                        "qB %s recovered after %d retr%s",
+                        operation,
+                        retries_used,
+                        "y" if retries_used == 1 else "ies",
+                    )
+                return result
             except Exception as e:
                 last = e
+                retries_used = attempt + 1
                 if not is_connection_error(e) or attempt == attempts - 1:
                     raise
                 delay = compute_backoff_delay(
@@ -387,14 +410,24 @@ class QbitClient:
                     self.cfg.qbit_request_initial_backoff_sec,
                     self.cfg.qbit_request_max_backoff_sec,
                 )
-                log.warning(
-                    "qB %s failed (attempt %d/%d): %s; retrying in %.1f seconds",
-                    operation,
-                    attempt + 1,
-                    attempts,
-                    short_error(e),
-                    delay,
-                )
+                if retries_used >= warn_after:
+                    log.warning(
+                        "qB %s failed (attempt %d/%d): %s; retrying in %.1f seconds",
+                        operation,
+                        attempt + 1,
+                        attempts,
+                        short_error(e),
+                        delay,
+                    )
+                else:
+                    log.debug(
+                        "qB %s transient failure (attempt %d/%d): %s; retrying in %.1f seconds",
+                        operation,
+                        attempt + 1,
+                        attempts,
+                        short_error(e),
+                        delay,
+                    )
                 time.sleep(delay)
         raise last
 
@@ -1283,6 +1316,7 @@ class MetadataFetcher:
                     )
 
                 if self.cfg.metadata_max_wait_sec > 0 and (time.time() - start_ts) >= self.cfg.metadata_max_wait_sec:
+                    log_stage_result("Metadata Fetch", "TIMEOUT", "hash=%s wait_sec=%d" % (torrent_hash[:8], self.cfg.metadata_max_wait_sec))
                     break
 
                 time.sleep(self.cfg.metadata_poll_interval)
@@ -1294,6 +1328,10 @@ class MetadataFetcher:
                 stop_context = "metadata error (%s)" % short_error(last_error, 80)
             self._safe_stop(torrent_hash, stop_context)
 
+        if files:
+            log_stage_result("Metadata Fetch", "PASS", "hash=%s files=%d" % (torrent_hash[:8], len(files)))
+        else:
+            log_stage_result("Metadata Fetch", "EMPTY", "hash=%s" % torrent_hash[:8])
         return files or []
 
 
@@ -1376,10 +1414,12 @@ class IsoCleaner:
                     try:
                         self.qbit.delete(torrent_hash, self.cfg.delete_files)
                         log.info("Removed torrent %s due to extension policy.", torrent_hash)
+                        log_stage_result("File/ISO/Ext Check", "DELETE", "reason=extension-policy disallowed=%d/%d" % (bad, total))
                     except Exception as e:
                         log.error("Failed to delete torrent %s from qBittorrent: %s", torrent_hash, e)
                 else:
                     log.info("DRY-RUN: would remove torrent %s due to extension policy.", torrent_hash)
+                    log_stage_result("File/ISO/Ext Check", "DELETE", "reason=extension-policy dry-run disallowed=%d/%d" % (bad, total))
                 return True
             
             # If uncheck_blocked_files is enabled and we have some allowed files
@@ -1400,11 +1440,13 @@ class IsoCleaner:
                             self.qbit.add_tags(torrent_hash, "guard:partial")
                             log.info("Unchecked %d file(s) from torrent %s due to extension policy.", 
                                    len(disallowed_ids), torrent_hash)
+                            log_stage_result("File/ISO/Ext Check", "PARTIAL", "unchecked=%d kept=%d" % (len(disallowed_ids), good))
                         except Exception as e:
                             log.error("Failed to uncheck files: %s", e)
                     else:
                         log.info("DRY-RUN: would uncheck %d file(s) from torrent %s due to extension policy.", 
                                len(disallowed_ids), torrent_hash)
+                        log_stage_result("File/ISO/Ext Check", "PARTIAL", "dry-run unchecked=%d kept=%d" % (len(disallowed_ids), good))
 
         # ---- Disc-image detection (ISO/BDMV) ----
         all_discish = (len(relevant) > 0) and all(self._is_disc_path(f.get("name","")) for f in relevant)
@@ -1418,15 +1460,22 @@ class IsoCleaner:
                 try:
                     self.qbit.delete(torrent_hash, self.cfg.delete_files)
                     log.info("Removed torrent %s (ISO/BDMV-only).", torrent_hash)
+                    log_stage_result("File/ISO/Ext Check", "DELETE", "reason=iso-only")
                 except Exception as e:
                     log.error("qB delete failed: %s", e)
             else:
                 log.info("DRY-RUN: would remove torrent %s (ISO/BDMV-only).", torrent_hash)
+                log_stage_result("File/ISO/Ext Check", "DELETE", "reason=iso-only dry-run")
             return True
 
         log.info("ISO/Ext check: keepable=%s, files=%d (disallowed=%d, action=%s).",
                  keepable, len(relevant), len(disallowed), 
                  "partial" if (disallowed and self.cfg.uncheck_blocked_files and len([f for f in relevant if self.cfg.is_path_allowed(f.get("name",""))]) > 0) else "passed")
+        log_stage_result(
+            "File/ISO/Ext Check",
+            "PASS",
+            "files=%d disallowed=%d keepable=%s" % (len(relevant), len(disallowed), keepable),
+        )
         return False
 
 
@@ -1469,7 +1518,7 @@ class TorrentGuard:
 
         if category_norm not in self.cfg.allowed_categories:
             log.info("Category '%s' not in allowed list %s - skipping.", category, sorted(self.cfg.allowed_categories))
-            log.info("Guard processing completed for torrent %s (category not allowed)", torrent_hash[:8])
+            log_stage_result("Guard", "SKIP", "hash=%s reason=category-not-allowed" % torrent_hash[:8])
             return
 
         # Stop immediately and tag
@@ -1537,6 +1586,7 @@ class TorrentGuard:
             preair_applied = True
             allow, reason, history_rows = self.preair.decision(self.qbit, torrent_hash, tracker_hosts)
             if not allow:
+                log_stage_result("Pre-air TV", "BLOCK", "reason=%s" % reason)
                 if not self.cfg.dry_run:
                     try:
                         self.sonarr.blocklist_download(torrent_hash)
@@ -1552,13 +1602,14 @@ class TorrentGuard:
                     log.info("DRY-RUN: would delete torrent %s due to TV pre-air (reason=%s).", torrent_hash, reason)
                 return
             else:
-                log.info("Pre-air TV passed (reason=%s). Proceeding to file/ISO/ext check.", reason)
+                log_stage_result("Pre-air TV", "PASS", "reason=%s" % reason)
         
         # Check movie pre-air gate (independent of TV check)
         if movie_should_apply:
             preair_applied = True
             allow, reason, history_rows = self.preair_movie.decision(self.qbit, torrent_hash, tracker_hosts)
             if not allow:
+                log_stage_result("Pre-air Movie", "BLOCK", "reason=%s" % reason)
                 if not self.cfg.dry_run:
                     try:
                         self.radarr.blocklist_download(torrent_hash)
@@ -1574,10 +1625,10 @@ class TorrentGuard:
                     log.info("DRY-RUN: would delete torrent %s due to movie pre-air (reason=%s).", torrent_hash, reason)
                 return
             else:
-                log.info("Pre-air Movie passed (reason=%s). Proceeding to file/ISO/ext check.", reason)
+                log_stage_result("Pre-air Movie", "PASS", "reason=%s" % reason)
         
         if not preair_applied:
-            log.info("Pre-air gate not applicable for category '%s' or services disabled.", category)
+            log_stage_result("Pre-air", "SKIP", "category=%s" % category)
 
         # 2) Metadata + ISO/Extension policy cleaner
         if self.cfg.enable_iso_check:
@@ -1587,17 +1638,20 @@ class TorrentGuard:
                 raise RuntimeError("metadata fetch failed: %s" % short_error(e)) from e
             if not files:
                 log.warning("Metadata not available; skipping ISO/ext check.")
+                log_stage_result("File/ISO/Ext Check", "SKIP", "reason=metadata-unavailable")
             else:
                 deleted = self.iso.evaluate_and_act(torrent_hash, category_norm)
                 if deleted:
                     return
+        else:
+            log_stage_result("File/ISO/Ext Check", "SKIP", "reason=disabled")
 
         # 3) Start for real
         self.qbit.add_tags(torrent_hash, "guard:allowed")
         if not self.cfg.dry_run:
             if not self.qbit.start(torrent_hash):
                 raise RuntimeError("qB failed to start torrent after checks")
-        log.info("Started torrent %s (%s) after checks.", torrent_hash, name)
+        log_stage_result("Final Start", "PASS", "hash=%s name=%s" % (torrent_hash[:8], name[:60]))
 
 
 # --------------------------- Main ---------------------------
