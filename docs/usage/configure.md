@@ -81,6 +81,9 @@ RADARR_PREAIR_CATEGORIES="radarr"            # Categories to apply pre-air check
 RADARR_CATEGORIES="radarr"                   # Categories to apply Radarr blocklisting to
 ```
 
+If `RADARR_PREAIR_CATEGORIES` is not set, qbit-guard falls back to
+`RADARR_CATEGORIES`.
+
 ### How Movie Pre-air Checking Works
 
 Similar to TV show pre-air checking, but for movies:
