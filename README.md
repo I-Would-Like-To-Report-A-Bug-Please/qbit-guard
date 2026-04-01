@@ -1,6 +1,6 @@
 # <img alt="qbit-guard logo" src="img/qbit-guard-icon.png"> qbit-guard
 
-A zero-dependency Python guard for qBittorrent that blocks pre-air TV episodes (Sonarr) and unreleased movies (Radarr), deletes ISO/BDMV-only torrents, and auto-blocklists bad releases in Sonarr/Radarr (with dedupe + queue failover). Runs on "torrent added", fetches metadata safely, and logs everything to stdout.
+A lightweight Python guard for qBittorrent that blocks pre-air TV episodes (Sonarr) and unreleased movies (Radarr), deletes ISO/BDMV-only torrents, and auto-blocklists bad releases in Sonarr/Radarr (with dedupe + queue failover). Runs on "torrent added", fetches metadata safely, and logs everything to stdout.
 
 ## Documentation
 
@@ -28,5 +28,5 @@ Please visit our GitHub Pages site for comprehensive documentation including:
 - **ISO/BDMV cleaner**: Removes disc-image-only torrents that lack keepable video content
 - **Smart blocklisting**: Blocklists in Sonarr/Radarr before deletion using deduped history
 - **Internet cross-verification**: Optional TVmaze and/or TheTVDB API integration
-- **Zero dependencies**: No external libraries, just Python 3.8+ stdlib
+- **Lightweight runtime**: Minimal Python runtime dependency surface
 - **Container-friendly**: All configuration via environment variables, logs to stdout

@@ -1,6 +1,6 @@
 # <img alt="qbit-guard logo" src="https://gengines.github.io/qbit-guard/img/qbit-guard-icon.png"> qbit-guard
 
-A zero-dependency Python guard for qBittorrent that provides intelligent torrent management with **pre-air checking** and **ISO/BDMV cleanup**.
+A lightweight Python guard for qBittorrent that provides intelligent torrent management with **pre-air checking** and **ISO/BDMV cleanup**.
 
 <div class="grid cards" markdown>
 
@@ -90,13 +90,13 @@ A zero-dependency Python guard for qBittorrent that provides intelligent torrent
     - WebUI authentication support
     - Category-based filtering
 
-=== "Zero Dependencies"
+=== "Lightweight Runtime"
 
     **Container-friendly and lightweight**
     
-    - Pure Python 3.8+ standard library
+    - Minimal Python runtime dependency surface
     - Environment variable configuration
-    - Structured JSON logging to stdout
+    - Structured logging to stdout
     - Minimal resource usage
 
 === "Selective File Control"
