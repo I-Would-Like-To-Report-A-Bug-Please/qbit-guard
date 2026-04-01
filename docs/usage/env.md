@@ -29,6 +29,7 @@ Complete reference of all environment variables supported by qbit-guard, organiz
 | `WATCH_POLL_SECONDS` | `3.0` | How often to check qBittorrent for new torrents (seconds) |
 | `WATCH_PROCESS_EXISTING_AT_START` | `0` | Process existing torrents when container starts (`0` or `1`) |
 | `WATCH_RESCAN_KEYWORD` | `rescan` | Keyword in category/tags to force reprocessing |
+| `WATCH_MAX_CONCURRENT_GUARDS` | `8` | Maximum number of torrents to guard in parallel |
 | `QBIT_CONNECTION_WARN_AFTER_ATTEMPT` | `0` | Start warning only from this watcher connection retry onward (`0` = auto, roughly halfway through retries) |
 | `GUARD_RUN_MAX_RETRIES` | `3` | Retry failed per-torrent guard runs this many times (`0` disables retries) |
 | `GUARD_RUN_INITIAL_BACKOFF_SEC` | `30.0` | Initial delay before retrying a failed guard run |
@@ -240,6 +241,9 @@ LOG_LEVEL=DETAILED  # Enhanced extension logging
 ```bash
 # Faster polling
 WATCH_POLL_SECONDS=1.0
+
+# Process multiple torrents in parallel so one metadata wait does not block the rest
+WATCH_MAX_CONCURRENT_GUARDS=8
 
 # Retry transient qB API failures
 QBIT_REQUEST_RETRIES=5
