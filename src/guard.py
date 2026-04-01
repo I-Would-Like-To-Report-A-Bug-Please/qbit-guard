@@ -212,6 +212,11 @@ class Config:
     # Radarr (ISO deletes)
     radarr_url: str = (os.getenv("RADARR_URL", "http://127.0.0.1:7878") or "").rstrip("/")
     radarr_apikey: str = os.getenv("RADARR_APIKEY", "")
+    radarr_preair_categories: Set[str] = frozenset(
+        c.strip().lower()
+        for c in os.getenv("RADARR_PREAIR_CATEGORIES", os.getenv("RADARR_CATEGORIES", "radarr")).split(",")
+        if c.strip()
+    )
     radarr_categories: Set[str] = frozenset(
         c.strip().lower() for c in os.getenv("RADARR_CATEGORIES", "radarr").split(",") if c.strip()
     )
@@ -1062,7 +1067,7 @@ class PreAirMovieGate:
         self.internet = internet
 
     def should_apply(self, category_norm: str) -> bool:
-        return self.cfg.enable_preair and self.radarr.enabled and (category_norm in self.cfg.radarr_categories)
+        return self.cfg.enable_preair and self.radarr.enabled and (category_norm in self.cfg.radarr_preair_categories)
 
     def decision(self, qbit: QbitClient, h: str, tracker_hosts: Set[str]) -> Tuple[bool, str, List[Dict[str, Any]]]:
         """
@@ -1100,6 +1105,7 @@ class PreAirMovieGate:
         for mid in movies:
             movie = self.radarr.movie(mid) or {}
             movie_cache[mid] = movie
+            radarr_date = None
 
             # First try to get digital release date from TMDB
             tmdb_release_dates = self.internet.tmdb_movie_release_dates(movie)
@@ -1116,16 +1122,16 @@ class PreAirMovieGate:
 
             # Apply Logic:
 
-            # 1. Check TMDB digital and physical dates first
-            release_date = tmdb_release_dates['digital'] or tmdb_release_dates['physical']
-
-            # 2. If those are empty, use theatrical date from TMDB
-            if release_date is None and tmdb_release_dates['theatrical']:
-                release_date = tmdb_release_dates['theatrical']
-                log.info("Movie %s: TMDB theatrical date available but no Digital/Physical date, considering as pre-air", mid)
-                return False, "block", hist
-            else:
+            # Prefer TMDB digital/physical, then theatrical, then Radarr metadata.
+            release_date = tmdb_release_dates["digital"] or tmdb_release_dates["physical"]
+            if release_date is not None:
+                log.info("Movie %s: Using TMDB digital/physical release date: %s", mid, release_date)
+            elif tmdb_release_dates["theatrical"] is not None:
+                release_date = tmdb_release_dates["theatrical"]
+                log.info("Movie %s: Using TMDB theatrical release date: %s", mid, release_date)
+            elif radarr_date is not None:
                 release_date = radarr_date
+                log.info("Movie %s: Falling back to Radarr release date: %s", mid, release_date)
 
             if release_date and release_date > now_utc():
                 future_hours.append(hours_until(release_date))
@@ -1224,7 +1230,8 @@ class MetadataFetcher:
         if files:
             return files
 
-        self.qbit.start(torrent_hash)
+        if not self.qbit.start(torrent_hash):
+            raise RuntimeError("qB failed to start torrent for metadata fetch")
         start_ts = time.time()
         ticks = 0
         base_downloaded = None
@@ -1247,7 +1254,8 @@ class MetadataFetcher:
                     if info:
                         state = (info.get("state") or "").lower()
                         if state in ("pauseddl","pausedup","stalleddl"):
-                            self.qbit.start(torrent_hash)
+                            if not self.qbit.start(torrent_hash):
+                                log.warning("Metadata fetch: failed to resume paused torrent %s while waiting for files.", torrent_hash[:8])
                         cur_downloaded = int(info.get("downloaded_session") or info.get("downloaded") or 0)
                         if base_downloaded is None:
                             base_downloaded = cur_downloaded
@@ -1444,9 +1452,7 @@ class TorrentGuard:
         try:
             self.qbit.login()
         except Exception as e:
-            log.critical("Fatal: qBittorrent login failed - %s", e)
-            log.critical("Terminating guard process (exit code 2)")
-            sys.exit(2)
+            raise RuntimeError("qBittorrent login failed: %s" % short_error(e)) from e
 
         try:
             info = self.qbit.info(torrent_hash)
@@ -1467,7 +1473,8 @@ class TorrentGuard:
             return
 
         # Stop immediately and tag
-        self.qbit.stop(torrent_hash)
+        if not self.qbit.stop(torrent_hash):
+            raise RuntimeError("qB failed to stop torrent before checks")
         self.qbit.add_tags(torrent_hash, "guard:stopped")
 
         # Check torrent age (filter out fake torrents with 0 or very recent creation date)
@@ -1524,7 +1531,7 @@ class TorrentGuard:
         if tv_should_apply and movie_should_apply:
             log.warning("Category '%s' matches both Sonarr (%s) and Radarr (%s) pre-air categories. "
                        "This may lead to unexpected behavior. Consider using distinct categories.",
-                       category, sorted(self.cfg.sonarr_categories), sorted(self.cfg.radarr_categories))
+                       category, sorted(self.cfg.sonarr_categories), sorted(self.cfg.radarr_preair_categories))
         
         if tv_should_apply:
             preair_applied = True
@@ -1588,7 +1595,8 @@ class TorrentGuard:
         # 3) Start for real
         self.qbit.add_tags(torrent_hash, "guard:allowed")
         if not self.cfg.dry_run:
-            self.qbit.start(torrent_hash)
+            if not self.qbit.start(torrent_hash):
+                raise RuntimeError("qB failed to start torrent after checks")
         log.info("Started torrent %s (%s) after checks.", torrent_hash, name)
 
 
