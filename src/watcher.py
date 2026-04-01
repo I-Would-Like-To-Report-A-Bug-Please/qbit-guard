@@ -101,6 +101,12 @@ def run_guard_job(cfg: Config, torrent_hash: str, category: str) -> None:
     # not race across threads.
     TorrentGuard(cfg).run(torrent_hash, category)
 
+
+def merge_torrent_state(previous: Dict[str, Any], current: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(previous or {})
+    merged.update(current or {})
+    return merged
+
 def _should_process(h: str, t: Dict, seen: Set[str], retry_state: Dict[str, Dict[str, Any]], inflight: Set[str], now_ts: float) -> Tuple[bool, str]:
     # Manual rescan via keyword in category or tags
     cat = (t.get("category") or "").strip().lower()
@@ -153,6 +159,7 @@ def main():
     seen: Set[str] = set()
     rid = 0
     retry_state: Dict[str, Dict[str, Any]] = {}
+    torrent_state: Dict[str, Dict[str, Any]] = {}
     executor = ThreadPoolExecutor(max_workers=max(1, WATCH_MAX_CONCURRENT_GUARDS), thread_name_prefix="guard")
     inflight: Dict[str, Dict[str, Any]] = {}
     first_snapshot = True
@@ -228,9 +235,12 @@ def main():
                 torrents = data.get("torrents") or {}
                 removed = data.get("torrents_removed") or []
 
+                for h, t in torrents.items():
+                    torrent_state[h] = merge_torrent_state(torrent_state.get(h, {}), t)
+
                 if first_snapshot:
                     first_snapshot = False
-                    present = set(torrents.keys())
+                    present = set(torrent_state.keys())
                     if PROCESS_EXISTING_AT_START:
                         log.info("Initial snapshot: processing %d existing torrents.", len(present))
                     else:
@@ -246,10 +256,11 @@ def main():
                     seen.discard(h)
                     retry_state.pop(h, None)
                     inflight.pop(h, None)
+                    torrent_state.pop(h, None)
 
                 now_ts = time.time()
                 inflight_hashes = set(inflight.keys())
-                for h, t in torrents.items():
+                for h, t in torrent_state.items():
                     name = t.get("name") or ""
                     category = (t.get("category") or "").strip()
                     ok, reason = _should_process(h, t, seen, retry_state, inflight_hashes, now_ts)
