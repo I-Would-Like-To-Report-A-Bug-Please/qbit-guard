@@ -7,6 +7,11 @@ import threading
 import time
 from typing import Any, Dict, Iterable
 
+from .logging_setup import get_logger
+
+
+log = get_logger("qbit-guard-state")
+
 
 class WatcherStateStore:
     def __init__(self, path: str):
@@ -45,21 +50,48 @@ class WatcherStateStore:
     def load_torrent_state(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute("SELECT hash, state_json FROM torrent_state").fetchall()
-        return {row["hash"]: json.loads(row["state_json"]) for row in rows}
+        loaded: Dict[str, Dict[str, Any]] = {}
+        stale_hashes = []
+        for row in rows:
+            torrent_hash = row["hash"]
+            try:
+                value = json.loads(row["state_json"])
+                if isinstance(value, dict):
+                    loaded[torrent_hash] = value
+                else:
+                    stale_hashes.append(torrent_hash)
+                    log.warning("Dropping invalid torrent_state row for %s (payload is not an object).", torrent_hash[:8])
+            except Exception:
+                stale_hashes.append(torrent_hash)
+                log.warning("Dropping corrupt torrent_state row for %s (invalid JSON).", torrent_hash[:8])
+        if stale_hashes:
+            with self._lock, self._conn:
+                self._conn.executemany("DELETE FROM torrent_state WHERE hash = ?", [(h,) for h in stale_hashes])
+                self._conn.executemany("DELETE FROM retry_state WHERE hash = ?", [(h,) for h in stale_hashes])
+        return loaded
 
     def load_retry_state(self) -> Dict[str, Dict[str, Any]]:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT hash, attempt, next_retry_at, last_error FROM retry_state"
             ).fetchall()
-        return {
-            row["hash"]: {
-                "attempt": int(row["attempt"]),
-                "next_retry_at": float(row["next_retry_at"]),
-                "last_error": row["last_error"] or "",
-            }
-            for row in rows
-        }
+        loaded: Dict[str, Dict[str, Any]] = {}
+        stale_hashes = []
+        for row in rows:
+            torrent_hash = row["hash"]
+            try:
+                loaded[torrent_hash] = {
+                    "attempt": int(row["attempt"]),
+                    "next_retry_at": float(row["next_retry_at"]),
+                    "last_error": row["last_error"] or "",
+                }
+            except Exception:
+                stale_hashes.append(torrent_hash)
+                log.warning("Dropping corrupt retry_state row for %s.", torrent_hash[:8])
+        if stale_hashes:
+            with self._lock, self._conn:
+                self._conn.executemany("DELETE FROM retry_state WHERE hash = ?", [(h,) for h in stale_hashes])
+        return loaded
 
     def upsert_torrent_state(self, torrent_hash: str, state: Dict[str, Any]) -> None:
         payload = json.dumps(state, sort_keys=True)
@@ -107,11 +139,14 @@ class WatcherStateStore:
     def prune_missing_hashes(self, active_hashes: Iterable[str]) -> None:
         active = set(active_hashes)
         with self._lock, self._conn:
-            rows = self._conn.execute("SELECT hash FROM torrent_state").fetchall()
-            stale = [row["hash"] for row in rows if row["hash"] not in active]
+            torrent_rows = self._conn.execute("SELECT hash FROM torrent_state").fetchall()
+            retry_rows = self._conn.execute("SELECT hash FROM retry_state").fetchall()
+            stale = {row["hash"] for row in torrent_rows if row["hash"] not in active}
+            stale.update(row["hash"] for row in retry_rows if row["hash"] not in active)
             if stale:
-                self._conn.executemany("DELETE FROM torrent_state WHERE hash = ?", [(h,) for h in stale])
-                self._conn.executemany("DELETE FROM retry_state WHERE hash = ?", [(h,) for h in stale])
+                stale_params = [(h,) for h in stale]
+                self._conn.executemany("DELETE FROM torrent_state WHERE hash = ?", stale_params)
+                self._conn.executemany("DELETE FROM retry_state WHERE hash = ?", stale_params)
 
     def close(self) -> None:
         with self._lock:

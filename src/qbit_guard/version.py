@@ -1,19 +1,40 @@
-import subprocess
-import os
+from __future__ import annotations
 
-def get_version():
-    """Get version from git tags or fallback to default."""
+import os
+import subprocess
+from importlib.metadata import PackageNotFoundError, version as package_version
+
+
+def get_version() -> str:
+    """
+    Resolve runtime version in a stable order:
+    1) APP_VERSION env var (CI/CD override)
+    2) Installed package metadata
+    3) Git tag (source tree fallback)
+    4) Static dev fallback
+    """
+    app_version = os.getenv("APP_VERSION", "").strip()
+    if app_version:
+        return app_version
+
     try:
-        # Try to get version from the most recent git tag
-        version = subprocess.check_output(['git', 'describe', '--tags', '--abbrev=0'], 
-                                         stderr=subprocess.DEVNULL).decode('utf-8').strip()
-        return version
+        return package_version("qbit-guard")
+    except PackageNotFoundError:
+        pass
+    except Exception:
+        pass
+
+    try:
+        return (
+            subprocess.check_output(
+                ["git", "describe", "--tags", "--abbrev=0"],
+                stderr=subprocess.DEVNULL,
+            )
+            .decode("utf-8")
+            .strip()
+        )
     except (subprocess.CalledProcessError, FileNotFoundError):
-        # If no git tag is available or not in a git repository
-        # Check if version is set as an environment variable (useful for CI/CD)
-        if 'APP_VERSION' in os.environ:
-            return os.environ['APP_VERSION']
-        # Fallback to a default version
         return "0.0.0-dev"
+
 
 VERSION = get_version()

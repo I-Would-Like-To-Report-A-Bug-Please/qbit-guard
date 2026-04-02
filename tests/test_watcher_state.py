@@ -47,3 +47,17 @@ class WatcherStateTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertEqual(reason, "in-flight")
+
+    def test_should_process_manual_rescan_even_when_seen(self) -> None:
+        ok, reason = should_process(
+            "abc",
+            {"category": "sonarr", "tags": "guard:metadata-pending,rescan"},
+            seen={"abc"},
+            retry_state={},
+            inflight=set(),
+            now_ts=15,
+            rescan_keyword="rescan",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reason, "manual-rescan")

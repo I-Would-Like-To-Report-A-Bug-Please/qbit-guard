@@ -129,8 +129,19 @@ def main():
 
     seen: Set[str] = set()
     rid = 0
-    retry_state: Dict[str, Dict[str, Any]] = state_store.load_retry_state() if state_store else {}
-    torrent_state: Dict[str, Dict[str, Any]] = state_store.load_torrent_state() if state_store else {}
+    retry_state: Dict[str, Dict[str, Any]] = {}
+    torrent_state: Dict[str, Dict[str, Any]] = {}
+    if state_store:
+        try:
+            retry_state = state_store.load_retry_state()
+        except Exception as e:
+            log.warning("Failed to load retry_state from %s: %s", WATCH_STATE_DB_PATH, str(e).split("\n")[0][:100])
+            retry_state = {}
+        try:
+            torrent_state = state_store.load_torrent_state()
+        except Exception as e:
+            log.warning("Failed to load torrent_state from %s: %s", WATCH_STATE_DB_PATH, str(e).split("\n")[0][:100])
+            torrent_state = {}
     executor = ThreadPoolExecutor(max_workers=max(1, WATCH_MAX_CONCURRENT_GUARDS), thread_name_prefix="guard")
     inflight: Dict[str, Dict[str, Any]] = {}
     first_snapshot = True
