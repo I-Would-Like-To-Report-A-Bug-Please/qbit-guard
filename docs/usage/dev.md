@@ -8,7 +8,8 @@ This guide covers development setup, testing procedures, debugging techniques, a
 
 ### Prerequisites
 
-- **Python 3.8+** with standard library
+- **Python 3.12+**
+- **uv** for local environment management
 - **Docker** and **Docker Compose** for testing
 - **qBittorrent** instance for testing (can be containerized)
 - Access to **Sonarr/Radarr** instances (optional, for integration testing)
@@ -21,7 +22,12 @@ This guide covers development setup, testing procedures, debugging techniques, a
    cd qbit-guard
    ```
 
-2. **Set up environment variables** for testing:
+2. **Install dependencies**:
+   ```bash
+   uv sync --extra dev --extra docs
+   ```
+
+3. **Set up environment variables** for testing:
    ```bash
    export QBIT_HOST=http://localhost:8080
    export QBIT_USER=admin
@@ -31,16 +37,14 @@ This guide covers development setup, testing procedures, debugging techniques, a
    export LOG_LEVEL=DEBUG
    ```
 
-3. **Run the script directly**:
+4. **Run the guard directly**:
    ```bash
-   cd src
-   python3 guard.py <torrent_id> <category>
+   uv run qbit-guard <torrent_id> <category>
    ```
 
-4. **Or test the watcher**:
+5. **Or run the watcher**:
    ```bash
-   cd src  
-   python3 watcher.py
+   uv run qbit-guard-watcher
    ```
 
 ### Container Development
@@ -62,17 +66,10 @@ This guide covers development setup, testing procedures, debugging techniques, a
 
 ### Unit Testing
 
-The project uses Python's built-in testing capabilities:
+Run the test suite:
 
 ```bash
-# Test configuration loading
-python3 -c "
-import sys
-sys.path.append('src')
-import guard
-# Test environment variable parsing
-print('Config loaded successfully')
-"
+uv run python -m unittest discover -s tests -v
 ```
 
 ### Integration Testing
@@ -85,12 +82,12 @@ print('Config loaded successfully')
 
 2. **Test with Dry Run**:
    ```bash
-   QBIT_DRY_RUN=1 LOG_LEVEL=DEBUG python3 src/guard.py test_torrent test_category
+   QBIT_DRY_RUN=1 LOG_LEVEL=DEBUG uv run qbit-guard test_torrent test_category
    ```
 
 3. **Test Pre-air Checking**:
    ```bash
-   ENABLE_PREAIR_CHECK=1 SONARR_URL=http://localhost:8989 SONARR_APIKEY=your_key QBIT_DRY_RUN=1 python3 src/guard.py test_torrent tv-sonarr
+   ENABLE_PREAIR_CHECK=1 SONARR_URL=http://localhost:8989 SONARR_APIKEY=your_key QBIT_DRY_RUN=1 uv run qbit-guard test_torrent tv-sonarr
    ```
 
 ### Manual Testing Scenarios
@@ -302,14 +299,14 @@ docker-compose logs qbit-guard
 
 ```bash
 # Check Python version
-python3 --version  # Must be 3.8+
+python3 --version  # Must be 3.12+
 
-# Verify script permissions
-ls -la src/guard.py
-chmod +x src/guard.py
+# Verify the package entrypoints are installed
+uv run qbit-guard --help
+uv run qbit-guard-watcher --help
 
 # Test with minimal config
-QBIT_DRY_RUN=1 python3 src/guard.py test test
+QBIT_DRY_RUN=1 uv run qbit-guard test test
 ```
 
 ### API Authentication Issues

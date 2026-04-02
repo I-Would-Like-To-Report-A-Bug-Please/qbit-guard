@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qbit-guard"
+version = "0.0.0"
+description = "Guard qBittorrent downloads with pre-air, metadata, and file-policy checks"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "loguru>=0.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "ruff>=0.12",
+]
+docs = [
+    "mkdocs-material>=9.5",
+    "mkdocs-awesome-pages-plugin>=2.10",
+    "mkdocs-git-revision-date-localized-plugin>=1.2",
+    "mkdocs-git-authors-plugin>=0.7",
+    "mkdocs-minify-plugin>=0.8",
+    "mkdocs-redirects>=1.2",
+]
+
+[project.scripts]
+qbit-guard = "qbit_guard.guard:cli"
+qbit-guard-watcher = "qbit_guard.watcher:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["qbit_guard*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

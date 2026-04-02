@@ -20,6 +20,16 @@ Please visit our GitHub Pages site for comprehensive documentation including:
 - **UNRAID:** Available in Community Applications as "qbit-guard" (or via binhex's version)
 - **Repository:** https://github.com/GEngines/qbit-guard
 
+## Development
+
+The project now uses a standard `pyproject.toml` layout under `src/qbit_guard/`.
+
+```bash
+uv sync --extra dev
+uv run python -m unittest discover -s tests -v
+uv run qbit-guard-watcher
+```
+
 ## Key Features
 
 - **Pre-air gate (Sonarr)**: Stops new TV torrents, checks airDateUtc with configurable grace periods
