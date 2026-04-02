@@ -233,6 +233,7 @@ WATCH_POLL_SECONDS=3.0                       # How often to check for new torren
 WATCH_PROCESS_EXISTING_AT_START=0            # Set to 1 to process existing torrents on startup
 WATCH_RESCAN_KEYWORD=rescan                  # Add this keyword to category/tags to force reprocessing
 WATCH_MAX_CONCURRENT_GUARDS=8                # Number of torrents to guard in parallel
+WATCH_STATE_DB_PATH=/config/qbit-guard-state.db  # SQLite file for persistent watcher retry/state data
 QBIT_CONNECTION_WARN_AFTER_ATTEMPT=0         # Start warning around halfway through watcher reconnect retries
 GUARD_RUN_MAX_RETRIES=3                      # Retry failed guard runs for the same torrent
 GUARD_RUN_INITIAL_BACKOFF_SEC=30.0           # First retry delay after a guard failure
@@ -247,6 +248,9 @@ internet reachability issues during metadata fetches or release-date checks.
 `WATCH_MAX_CONCURRENT_GUARDS` controls how many torrents can be guarded at the
 same time. Increase it above `1` if metadata waits or slow API calls are
 causing head-of-line blocking in the watcher loop.
+
+`WATCH_STATE_DB_PATH` enables persistent watcher state in a small SQLite file.
+This keeps retry schedules and cached torrent metadata across container restarts.
 
 ### Connection Reliability
 

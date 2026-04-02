@@ -262,8 +262,7 @@ flowchart TD
 === "Python Script"
 
     ```bash
-    # Download the script
-    wget https://github.com/GEngines/qbit-guard/raw/main/src/guard.py
+    uv tool install --from git+https://github.com/GEngines/qbit-guard qbit-guard
     
     # Set environment variables
     export QBIT_HOST=http://localhost:8080
@@ -278,8 +277,8 @@ flowchart TD
     export RADARR_APIKEY=your_radarr_api_key
     export TMDB_APIKEY=your_tmdb_api_key  # Optional: for enhanced movie release date accuracy
     
-    # Run the script
-    python3 qbit_guard.py
+    # Run the watcher
+    qbit-guard-watcher
     ```
 
 !!! tip "Next Steps"

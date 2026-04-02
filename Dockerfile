@@ -1,23 +1,44 @@
-# Dockerfile
-FROM python:3.12-slim
+FROM python:3.12-slim AS base
 
 ENV PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
-
-# Install git for version detection
-RUN apt-get update && apt-get install -y git && apt-get clean
-RUN pip install --no-cache-dir loguru
+    UV_LINK_MODE=copy
 
 WORKDIR /app
-COPY src/guard.py /app/guard.py
-COPY src/logging_setup.py /app/logging_setup.py
-COPY src/watcher.py /app/watcher.py
 
-# Create a version file during build
+COPY --from=ghcr.io/astral-sh/uv:0.8.22 /uv /uvx /bin/
+
+
+FROM base AS test
+
 ARG BUILD_VERSION
 ENV APP_VERSION=${BUILD_VERSION:-0.0.0-dev}
 
-# Create version.py dynamically during build
-RUN echo "VERSION = '${APP_VERSION}'" > /app/version.py
+COPY pyproject.toml README.md /app/
+COPY src /app/src
+COPY tests /app/tests
 
-ENTRYPOINT ["python", "/app/watcher.py"]
+RUN uv sync --extra dev
+RUN uv run python -m unittest discover -s tests -v
+
+
+FROM base AS build
+
+ARG BUILD_VERSION
+ENV APP_VERSION=${BUILD_VERSION:-0.0.0-dev}
+
+COPY pyproject.toml README.md /app/
+COPY src /app/src
+
+RUN uv sync --no-dev --no-editable
+
+
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONUNBUFFERED=1 \
+    PATH="/app/.venv/bin:$PATH"
+
+WORKDIR /app
+
+COPY --from=build /app/.venv /app/.venv
+
+ENTRYPOINT ["qbit-guard-watcher"]
